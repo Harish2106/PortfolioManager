@@ -99,6 +99,7 @@ if page == "🏠 Dashboard":
         portfolio_data = []
         total_value = 0
         daily_change_total = 0
+        failed_symbols = []
         
         for idx, row in st.session_state.portfolio.iterrows():
             symbol = row['Symbol']
@@ -107,7 +108,7 @@ if page == "🏠 Dashboard":
             
             current_price = get_current_price(symbol)
             if current_price is None:
-                st.error(f"Could not fetch price for {symbol}")
+                failed_symbols.append(symbol)
                 continue
                 
             current_value = shares * current_price
@@ -115,7 +116,7 @@ if page == "🏠 Dashboard":
             gain_loss = current_value - cost_basis
             gain_loss_pct = (gain_loss / cost_basis) * 100 if cost_basis > 0 else 0
             
-            # Daily change (approx using today's open vs close; simplified)
+            # Daily change (approx using last two closes)
             hist = yf.Ticker(symbol).history(period='2d')
             if len(hist) >= 2:
                 daily_change = (hist['Close'].iloc[-1] - hist['Close'].iloc[-2]) / hist['Close'].iloc[-2] * 100
@@ -135,55 +136,63 @@ if page == "🏠 Dashboard":
             total_value += current_value
             daily_change_total += (current_value * daily_change / 100)
         
-        # Create dataframe for display
-        df_portfolio = pd.DataFrame(portfolio_data)
+        # Show warnings for failed fetches
+        if failed_symbols:
+            st.warning(f"Could not fetch current prices for: {', '.join(failed_symbols)}. They are excluded from calculations.")
         
-        # Metrics row
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Total Portfolio Value", f"${total_value:,.2f}")
-        with col2:
-            total_gain_loss = df_portfolio['Gain/Loss ($)'].sum()
-            total_gain_loss_pct = (total_gain_loss / (total_value - total_gain_loss)) * 100 if total_value != total_gain_loss else 0
-            st.metric("Total Gain/Loss", f"${total_gain_loss:,.2f}", delta=f"{total_gain_loss_pct:.2f}%")
-        with col3:
-            st.metric("Today's Change", f"${daily_change_total:,.2f}", delta=f"{(daily_change_total/total_value)*100:.2f}%" if total_value > 0 else "0%")
-        with col4:
-            best_holding = df_portfolio.loc[df_portfolio['Gain/Loss (%)'].idxmax()] if not df_portfolio.empty else None
-            worst_holding = df_portfolio.loc[df_portfolio['Gain/Loss (%)'].idxmin()] if not df_portfolio.empty else None
-            st.metric("🏆 Best Performer", best_holding['Symbol'] if best_holding is not None else "N/A", 
-                      delta=f"{best_holding['Gain/Loss (%)']:.2f}%" if best_holding is not None else None)
-        
-        # Portfolio holdings table
-        st.subheader("📋 Current Holdings")
-        st.dataframe(df_portfolio.style.format({
-            'Current Value': '${:,.2f}',
-            'Gain/Loss ($)': '${:,.2f}',
-            'Gain/Loss (%)': '{:.2f}%',
-            'Daily Change (%)': '{:.2f}%'
-        }), use_container_width=True)
-        
-        # Allocation pie chart
-        st.subheader("🥧 Portfolio Allocation by Value")
-        fig_pie = px.pie(df_portfolio, values='Current Value', names='Symbol', title="")
-        st.plotly_chart(fig_pie, use_container_width=True)
-        
-        # Performance over time (if we have historical prices for each symbol)
-        st.subheader("📈 Performance Over Last 30 Days")
-        # Build a combined dataframe
-        end = datetime.now()
-        start = end - timedelta(days=30)
-        combined = pd.DataFrame()
-        for symbol in df_portfolio['Symbol'].unique():
-            hist = yf.Ticker(symbol).history(start=start, end=end)
-            if not hist.empty:
-                # Normalize to percentage change from start
-                norm = hist['Close'] / hist['Close'].iloc[0] * 100
-                combined[symbol] = norm
-        if not combined.empty:
-            st.line_chart(combined)
+        # If no valid holdings after filtering, show empty state
+        if not portfolio_data:
+            st.error("No valid stock data available. Please check your holdings or try again later.")
         else:
-            st.info("Insufficient historical data to display performance chart.")
+            df_portfolio = pd.DataFrame(portfolio_data)
+            
+            # Metrics row
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Portfolio Value", f"${total_value:,.2f}")
+            with col2:
+                total_gain_loss = df_portfolio['Gain/Loss ($)'].sum()
+                total_cost = (df_portfolio['Shares'] * df_portfolio['Purchase Price']).sum()
+                total_gain_loss_pct = (total_gain_loss / total_cost) * 100 if total_cost > 0 else 0
+                st.metric("Total Gain/Loss", f"${total_gain_loss:,.2f}", delta=f"{total_gain_loss_pct:.2f}%")
+            with col3:
+                st.metric("Today's Change", f"${daily_change_total:,.2f}", 
+                          delta=f"{(daily_change_total/total_value)*100:.2f}%" if total_value > 0 else "0%")
+            with col4:
+                best_holding = df_portfolio.loc[df_portfolio['Gain/Loss (%)'].idxmax()] if not df_portfolio.empty else None
+                worst_holding = df_portfolio.loc[df_portfolio['Gain/Loss (%)'].idxmin()] if not df_portfolio.empty else None
+                st.metric("🏆 Best Performer", best_holding['Symbol'] if best_holding is not None else "N/A", 
+                          delta=f"{best_holding['Gain/Loss (%)']:.2f}%" if best_holding is not None else None)
+            
+            # Portfolio holdings table
+            st.subheader("📋 Current Holdings")
+            st.dataframe(df_portfolio.style.format({
+                'Current Value': '${:,.2f}',
+                'Gain/Loss ($)': '${:,.2f}',
+                'Gain/Loss (%)': '{:.2f}%',
+                'Daily Change (%)': '{:.2f}%'
+            }), use_container_width=True)
+            
+            # Allocation pie chart
+            if len(df_portfolio) > 0:
+                st.subheader("🥧 Portfolio Allocation by Value")
+                fig_pie = px.pie(df_portfolio, values='Current Value', names='Symbol', title="")
+                st.plotly_chart(fig_pie, use_container_width=True)
+            
+            # Performance over last 30 days
+            st.subheader("📈 Performance Over Last 30 Days")
+            end = datetime.now()
+            start = end - timedelta(days=30)
+            combined = pd.DataFrame()
+            for symbol in df_portfolio['Symbol'].unique():
+                hist = yf.Ticker(symbol).history(start=start, end=end)
+                if not hist.empty and len(hist) > 0:
+                    norm = hist['Close'] / hist['Close'].iloc[0] * 100
+                    combined[symbol] = norm
+            if not combined.empty:
+                st.line_chart(combined)
+            else:
+                st.info("Insufficient historical data to display performance chart.")
             
 # ---------------------------
 # Page: Portfolio Management

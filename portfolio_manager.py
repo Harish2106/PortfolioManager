@@ -1,23 +1,105 @@
+"""
+NIFTY Stock Portfolio Optimiser + Price Predictor
+Full-featured Indian stock market analytics dashboard
+"""
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import warnings
+from scipy import stats
+
 warnings.filterwarnings('ignore')
 
 # ---------------------------
 # Page configuration
 # ---------------------------
-st.set_page_config(page_title="Stock Portfolio Manager", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(
+    page_title="NIFTY Portfolio Optimiser",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ---------------------------
+# NIFTY 50 const
+# ---------------------------
+NIFTY_50_SYMBOLS = [
+    "^NSEI",  # NIFTY 50 index itself
+    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
+    "HINDUNILVR.NS", "SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS", "BAJFINANCE.NS",
+    "ITC.NS", "WIPRO.NS", "AXISBANK.NS", "HCLTECH.NS", "LT.NS",
+    "SUNPHARMA.NS", "TITAN.NS", "MARUTI.NS", "ASIANPAINT.NS", "NESTLEIND.NS",
+    "ULTRACEMCO.NS", "TECHM.NS", "POWERGRID.NS", "M&M.NS", "BAJAJFINSV.NS",
+    "TATAMOTORS.NS", "GRASIM.NS", "NTPC.NS", "INDUSINDBK.NS", "ONGC.NS",
+    "DIVISLAB.NS", "DRREDDY.NS", "HDFCLIFE.NS", "BRITANNIA.NS", "CIPLA.NS",
+    "SBILIFE.NS", "JSWSTEEL.NS", "ADANIPORTS.NS", "COALINDIA.NS", "EICHERMOT.NS",
+    "HEROMOTOCO.NS", "BPCL.NS", "TATASTEEL.NS", "HDFC.NS", "SHREECEM.NS",
+    "UPL.NS", "BAJAJ-AUTO.NS", "TATACONSUM.NS", "HINDALCO.NS"
+]
 
 # ---------------------------
 # Helper functions for indicators
 # ---------------------------
-def compute_RSI(data, window=14):
-    """Compute Relative Strength Index (RSI)"""
+def fetch_stock_data(symbols, period="1y"):
+    """Fetch historical data for multiple symbols"""
+    try:
+        if len(symbols) == 1:
+            stock = yf.Ticker(symbols[0])
+            df = stock.history(period=period)
+            if df.empty:
+                st.error(f"No data found for {symbols[0]}")
+                return None
+            df.index = pd.to_datetime(df.index)
+            return df
+        else:
+            data = {}
+            for symbol in symbols:
+                try:
+                    stock = yf.Ticker(symbol)
+                    df = stock.history(period=period)
+                    if not df.empty:
+                        df.index = pd.to_datetime(df.index)
+                        data[symbol] = df['Close']
+                except:
+                    continue
+            if not data:
+                st.error("No data found for any symbol")
+                return None
+            df = pd.DataFrame(data)
+            return df
+    except Exception as e:
+        st.error(f"Error fetching data: {str(e)}")
+        return None
+
+
+def compute_sma(data, window):
+    """Simple Moving Average"""
+    return data.rolling(window=window).mean()
+
+
+def compute_ema(data, span):
+    """Exponential Moving Average"""
+    return data.ewm(span=span, adjust=False).mean()
+
+
+def compute_macd(data, fast=12, slow=26, signal=9):
+    """MACD line, signal line, histogram"""
+    ema_fast = compute_ema(data, fast)
+    ema_slow = compute_ema(data, slow)
+    macd_line = ema_fast - ema_slow
+    signal_line = compute_ema(macd_line, signal)
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+
+def compute_rsi(data, window=14):
+    """Relative Strength Index"""
     delta = data.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
@@ -25,383 +107,698 @@ def compute_RSI(data, window=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
-def compute_MACD(data, slow=26, fast=12, signal=9):
-    """Compute MACD line, signal line, and histogram"""
-    ema_fast = data.ewm(span=fast, adjust=False).mean()
-    ema_slow = data.ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return macd_line, signal_line, histogram
 
-def compute_Bollinger_Bands(data, window=20, num_std=2):
-    """Compute Bollinger Bands (middle, upper, lower)"""
-    rolling_mean = data.rolling(window=window).mean()
-    rolling_std = data.rolling(window=window).std()
-    upper_band = rolling_mean + (rolling_std * num_std)
-    lower_band = rolling_mean - (rolling_std * num_std)
-    return rolling_mean, upper_band, lower_band
+def compute_bollinger_bands(data, window=20, num_std=2):
+    """Bollinger Bands"""
+    sma = data.rolling(window=window).mean()
+    std = data.rolling(window=window).std()
+    upper = sma + (std * num_std)
+    lower = sma - (std * num_std)
+    return sma, upper, lower
 
-def get_stock_data(symbol, period='1y'):
-    """Fetch stock data from yfinance"""
-    try:
-        stock = yf.Ticker(symbol)
-        df = stock.history(period=period)
-        if df.empty:
-            return None
-        return df
-    except:
-        return None
 
-def get_current_price(symbol):
-    """Get latest closing price"""
-    try:
-        stock = yf.Ticker(symbol)
-        # Try to get current price from fast info
-        info = stock.info
-        price = info.get('currentPrice') or info.get('regularMarketPrice')
-        if price is None:
-            # Fallback to last close from history
-            hist = stock.history(period='1d')
-            if not hist.empty:
-                price = hist['Close'].iloc[-1]
-        return price
-    except:
-        return None
+def compute_atr(high, low, close, window=14):
+    """Average True Range (Volatility)"""
+    tr1 = high - low
+    tr2 = abs(high - close.shift())
+    tr3 = abs(low - close.shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=window).mean()
+    return atr
+
+
+def compute_adx(high, low, close, window=14):
+    """Average Directional Index (Trend Strength)"""
+    plus_dm = high.diff()
+    minus_dm = low.diff()
+    plus_dm[plus_dm < 0] = 0
+    minus_dm[minus_dm > 0] = 0
+    
+    atr = compute_atr(high, low, close, window)
+    
+    plus_di = 100 * (plus_dm.rolling(window=window).mean() / atr)
+    minus_di = 100 * (abs(minus_dm).rolling(window=window).mean() / atr)
+    
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = dx.rolling(window=window).mean()
+    
+    return adx, plus_di, minus_di
+
+
+def compute_obv(close, volume):
+    """On-Balance Volume"""
+    obv = np.zeros(len(close))
+    for i in range(1, len(close)):
+        if close.iloc[i] > close.iloc[i-1]:
+            obv[i] = obv[i-1] + volume.iloc[i]
+        elif close.iloc[i] < close.iloc[i-1]:
+            obv[i] = obv[i-1] - volume.iloc[i]
+        else:
+            obv[i] = obv[i-1]
+    return pd.Series(obv, index=close.index)
+
+
+def compute_stochastic(high, low, close, k_window=14, d_window=3):
+    """Stochastic Oscillator"""
+    low_min = low.rolling(window=k_window).min()
+    high_max = high.rolling(window=k_window).max()
+    stoch_k = 100 * (close - low_min) / (high_max - low_min)
+    stoch_d = stoch_k.rolling(window=d_window).mean()
+    return stoch_k, stoch_d
+
+
+def compute_ichimoku(high, low, close, conversion=9, base=26, lagging=52):
+    """Ichimoku Cloud components"""
+    conversion_line = (high.rolling(window=conversion).max() + low.rolling(window=conversion).min()) / 2
+    base_line = (high.rolling(window=base).max() + low.rolling(window=base).min()) / 2
+    leading_span_a = ((conversion_line + base_line) / 2).shift(base)
+    leading_span_b = ((high.rolling(window=lagging).max() + low.rolling(window=lagging).min()) / 2).shift(base)
+    lagging_span = close.shift(-base)
+    return conversion_line, base_line, leading_span_a, leading_span_b, lagging_span
+
+
+def compute_fibonacci_levels(high, low):
+    """Fibonacci retracement levels"""
+    diff = high - low
+    levels = {
+        '0%': low,
+        '23.6%': low + diff * 0.236,
+        '38.2%': low + diff * 0.382,
+        '50%': low + diff * 0.5,
+        '61.8%': low + diff * 0.618,
+        '78.6%': low + diff * 0.786,
+        '100%': high
+    }
+    return levels
+
+
+def compute_risk_metrics(returns):
+    """Compute comprehensive risk metrics"""
+    # Sharpe ratio (assuming 6% risk-free rate for Indian market)
+    risk_free_rate = 0.06
+    excess_returns = returns - risk_free_rate / 252
+    sharpe = np.sqrt(252) * excess_returns.mean() / returns.std() if returns.std() > 0 else 0
+    
+    # Sortino ratio (downside deviation)
+    downside_returns = returns[returns < 0]
+    sortino = np.sqrt(252) * returns.mean() / downside_returns.std() if len(downside_returns) > 0 and downside_returns.std() > 0 else 0
+    
+    # Max drawdown
+    cumulative = (1 + returns).cumprod()
+    running_max = cumulative.expanding().max()
+    drawdown = (cumulative - running_max) / running_max
+    max_drawdown = drawdown.min()
+    
+    # Value at Risk (95% confidence)
+    var_95 = np.percentile(returns, 5) * np.sqrt(252)
+    
+    # Conditional Value at Risk (Expected Shortfall)
+    cvar_95 = returns[returns <= np.percentile(returns, 5)].mean() * np.sqrt(252)
+    
+    return {
+        'Sharpe Ratio': sharpe,
+        'Sortino Ratio': sortino,
+        'Max Drawdown': max_drawdown,
+        'VaR (95%)': var_95,
+        'CVaR (95%)': cvar_95,
+        'Annualized Volatility': returns.std() * np.sqrt(252),
+        'Annualized Return': (1 + returns.mean()) ** 252 - 1
+    }
+
+
+def compute_signal_score(data_dict):
+    """Compute combined signal score from multiple indicators"""
+    score = 0
+    reasons = []
+    
+    # RSI Signal
+    rsi = data_dict.get('rsi', 50)
+    if rsi < 30:
+        score += 25
+        reasons.append(f"RSI {rsi:.1f} < 30 — Oversold (BUY Signal)")
+    elif rsi > 70:
+        score -= 25
+        reasons.append(f"RSI {rsi:.1f} > 70 — Overbought (SELL Signal)")
+    elif rsi < 40:
+        score += 10
+        reasons.append(f"RSI {rsi:.1f} < 40 — Approaching oversold")
+    elif rsi > 60:
+        score -= 10
+        reasons.append(f"RSI {rsi:.1f} > 60 — Approaching overbought")
+    
+    # MACD Signal
+    macd = data_dict.get('macd_hist', 0)
+    macd_prev = data_dict.get('macd_hist_prev', 0)
+    if macd > 0 and macd_prev <= 0:
+        score += 30
+        reasons.append("MACD Histogram turns positive — Bullish Crossover")
+    elif macd < 0 and macd_prev >= 0:
+        score -= 30
+        reasons.append("MACD Histogram turns negative — Bearish Crossover")
+    elif macd > 0:
+        score += 10
+        reasons.append("MACD Histogram positive — Bullish momentum")
+    elif macd < 0:
+        score -= 10
+        reasons.append("MACD Histogram negative — Bearish momentum")
+    
+    # Bollinger Bands Signal
+    bb_position = data_dict.get('bb_position', 0.5)
+    if bb_position < 0:
+        score += 20
+        reasons.append("Price below Lower Bollinger Band — Oversold bounce possible")
+    elif bb_position > 1:
+        score -= 20
+        reasons.append("Price above Upper Bollinger Band — Overbrought pullback possible")
+    
+    # Moving Average Crossover
+    ma_cross = data_dict.get('ma_cross', 0)
+    if ma_cross == 1:
+        score += 15
+        reasons.append("Golden Cross (50MA > 200MA) — Bullish trend")
+    elif ma_cross == -1:
+        score -= 15
+        reasons.append("Death Cross (50MA < 200MA) — Bearish trend")
+    
+    # Volume confirmation
+    volume_ratio = data_dict.get('volume_ratio', 1)
+    if volume_ratio > 1.5:
+        if score > 0:
+            score += 15
+            reasons.append(f"Volume {volume_ratio:.1f}x average — Volume confirmation")
+        elif score < 0:
+            score -= 10
+            reasons.append(f"Volume {volume_ratio:.1f}x average — Selling pressure")
+    
+    # ATR Trend Strength
+    atr = data_dict.get('atr', 0)
+    if atr > data_dict.get('avg_atr', 0) * 1.5:
+        if score > 0:
+            score += 10
+            reasons.append("High volatility — Strong trend")
+    
+    return score, reasons
+
 
 # ---------------------------
 # Initialize session state
 # ---------------------------
 if 'portfolio' not in st.session_state:
-    st.session_state.portfolio = pd.DataFrame(columns=['Symbol', 'Shares', 'Purchase Price'])
-if 'watchlist' not in st.session_state:
-    st.session_state.watchlist = []
+    st.session_state.portfolio = pd.DataFrame(columns=['Symbol', 'Allocation %'])
+if 'selected_stocks' not in st.session_state:
+    st.session_state.selected_stocks = NIFTY_50_SYMBOLS[:10]
+if 'analysis_data' not in st.session_state:
+    st.session_state.analysis_data = {}
 
 # ---------------------------
 # Sidebar Navigation
 # ---------------------------
-st.sidebar.title("📊 Navigation")
-page = st.sidebar.radio("Go to", ["🏠 Dashboard", "📈 Portfolio", "👀 Watchlist", "🔬 Analysis"])
+st.sidebar.title("📊 NIFTY Portfolio Optimiser")
+st.sidebar.markdown("### Navigation")
+page = st.sidebar.radio(
+    "Go to",
+    ["🏠 Dashboard", "📈 Portfolio Builder", "🔬 Stock Analysis", "🎯 Signal Scanner", "📊 Risk Analytics"]
+)
 
 st.sidebar.markdown("---")
-st.sidebar.info("Built with Streamlit + yfinance\n\nData delayed by 15-20 min.")
+st.sidebar.markdown("**Data Source**: Yahoo Finance (NSE)")
+st.sidebar.markdown("**NIFTY 50 Universe**: 50 stocks")
+st.sidebar.markdown("---")
+st.sidebar.caption("Built for Indian Markets | Real-time Data")
+
 
 # ---------------------------
-# Page: Dashboard
+# Page 1: Dashboard
 # ---------------------------
 if page == "🏠 Dashboard":
-    st.title("📊 Portfolio Dashboard")
+    st.title("🏠 NIFTY Market Dashboard")
+    st.markdown("Real-time overview of NIFTY 50 and your portfolio performance")
     
-    if st.session_state.portfolio.empty:
-        st.warning("Your portfolio is empty. Go to the **Portfolio** page to add stocks.")
-    else:
-        # Fetch current prices for each holding
-        portfolio_data = []
-        total_value = 0
-        daily_change_total = 0
-        failed_symbols = []
+    # Fetch NIFTY 50 Index Data
+    nifty_data = fetch_stock_data(["^NSEI"], period="1mo")
+    if nifty_data is not None and not nifty_data.empty:
+        col1, col2, col3, col4 = st.columns(4)
+        current_nifty = nifty_data['Close'].iloc[-1]
+        prev_nifty = nifty_data['Close'].iloc[-2]
+        nifty_change = ((current_nifty - prev_nifty) / prev_nifty) * 100
         
-        for idx, row in st.session_state.portfolio.iterrows():
-            symbol = row['Symbol']
-            shares = row['Shares']
-            purchase_price = row['Purchase Price']
-            
-            current_price = get_current_price(symbol)
-            if current_price is None:
-                failed_symbols.append(symbol)
-                continue
+        col1.metric("NIFTY 50", f"{current_nifty:,.2f}", delta=f"{nifty_change:.2f}%")
+        
+        # Market breadth (Approximated)
+        nifty_close = nifty_data['Close']
+        nifty_ma20 = compute_sma(nifty_close, 20)
+        nifty_ma50 = compute_sma(nifty_close, 50)
+        
+        if nifty_close.iloc[-1] > nifty_ma50.iloc[-1]:
+            col2.metric("Market Trend", "Bullish", delta="Above 50 DMA")
+            breadth = "Positive"
+        else:
+            col2.metric("Market Trend", "Bearish", delta="Below 50 DMA")
+            breadth = "Negative"
+        
+        col3.metric("20-Day SMA", f"{nifty_ma20.iloc[-1]:,.2f}")
+        col4.metric("50-Day SMA", f"{nifty_ma50.iloc[-1]:,.2f}")
+        
+        # NIFTY Price Chart
+        st.subheader("NIFTY 50 Price Movement")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=nifty_data.index, y=nifty_data['Close'], mode='lines', name='NIFTY 50', line=dict(color='blue')))
+        fig.add_trace(go.Scatter(x=nifty_data.index, y=nifty_ma20, mode='lines', name='20-Day SMA', line=dict(color='orange', dash='dash')))
+        fig.add_trace(go.Scatter(x=nifty_data.index, y=nifty_ma50, mode='lines', name='50-Day SMA', line=dict(color='red', dash='dash')))
+        fig.update_layout(title='NIFTY 50 Historical Prices with Moving Averages', xaxis_title='Date', yaxis_title='Price (INR)', hovermode='x unified')
+        st.plotly_chart(fig, use_container_width=True)
+
+# ---------------------------
+# Page 2: Portfolio Builder
+# ---------------------------
+elif page == "📈 Portfolio Builder":
+    st.title("📈 Portfolio Builder & Optimisation")
+    st.markdown("Build your portfolio using NIFTY 50 stocks and optimise allocation")
+    
+    # Stock selector
+    selected_symbols = st.multiselect("Select Stocks for Portfolio", NIFTY_50_SYMBOLS, default=NIFTY_50_SYMBOLS[:10])
+    
+    if len(selected_symbols) >= 2:
+        period = st.selectbox("Analysis Period", ["6mo", "1y", "2y"], index=1)
+        
+        if st.button("Optimise Portfolio"):
+            with st.spinner("Fetching Data & Optimising Portfolio..."):
+                # Fetch Returns data
+                returns_data = fetch_stock_data(selected_symbols, period=period)
                 
-            current_value = shares * current_price
-            cost_basis = shares * purchase_price
-            gain_loss = current_value - cost_basis
-            gain_loss_pct = (gain_loss / cost_basis) * 100 if cost_basis > 0 else 0
-            
-            # Daily change (approx using last two closes)
-            hist = yf.Ticker(symbol).history(period='2d')
-            if len(hist) >= 2:
-                daily_change = (hist['Close'].iloc[-1] - hist['Close'].iloc[-2]) / hist['Close'].iloc[-2] * 100
-            else:
-                daily_change = 0
-            
-            portfolio_data.append({
-                'Symbol': symbol,
-                'Shares': shares,
-                'Purchase Price': purchase_price,
-                'Current Price': current_price,
-                'Current Value': current_value,
-                'Gain/Loss ($)': gain_loss,
-                'Gain/Loss (%)': gain_loss_pct,
-                'Daily Change (%)': daily_change
+                if returns_data is not None and not returns_data.empty:
+                    # Calculate Returns
+                    returns = returns_data.pct_change().dropna()
+                    
+                    # Monte Carlo Simulation for Efficient Frontier
+                    num_portfolios = 10000
+                    results = np.zeros((4, num_portfolios))
+                    weights_record = []
+                    
+                    for i in range(num_portfolios):
+                        weights = np.random.random(len(selected_symbols))
+                        weights /= np.sum(weights)
+                        weights_record.append(weights)
+                        
+                        port_return = np.sum(returns.mean() * weights) * 252
+                        port_std = np.sqrt(np.dot(weights.T, np.dot(returns.cov() * 252, weights)))
+                        sharpe = port_return / port_std
+                        
+                        results[0, i] = port_return
+                        results[1, i] = port_std
+                        results[2, i] = sharpe
+                        results[3, i] = np.sum((port_return / port_std))
+                    
+                    # Find Maximum Sharpe Ratio
+                    max_sharpe_idx = np.argmax(results[2])
+                    optimal_weights = weights_record[max_sharpe_idx]
+                    
+                    # Display Results
+                    st.subheader("📊 Optimal Portfolio Allocation")
+                    opt_df = pd.DataFrame({
+                        'Stock': selected_symbols,
+                        'Optimal Weight %': optimal_weights * 100
+                    }).sort_values('Optimal Weight %', ascending=False)
+                    
+                    st.dataframe(opt_df.style.format({'Optimal Weight %': '{:.2f}%'}), use_container_width=True)
+                    
+                    # Pie Chart
+                    fig_pie = px.pie(opt_df, values='Optimal Weight %', names='Stock', title='Optimal Portfolio Allocation')
+                    st.plotly_chart(fig_pie, use_container_width=True)
+                    
+                    # Efficient Frontier Scatter
+                    st.subheader("Efficient Frontier")
+                    fig_frontier = go.Figure()
+                    fig_frontier.add_trace(go.Scatter(
+                        x=results[1,:], y=results[0,:],
+                        mode='markers',
+                        marker=dict(color=results[2,:], colorscale='RdYlGn', showscale=True),
+                        text=[f'Sharpe: {sharpe:.2f}' for sharpe in results[2,:]],
+                        name='Random Portfolios'
+                    ))
+                    fig_frontier.add_trace(go.Scatter(
+                        x=[results[1, max_sharpe_idx]], y=[results[0, max_sharpe_idx]],
+                        mode='markers',
+                        marker=dict(color='red', size=15),
+                        name='Max Sharpe Portfolio'
+                    ))
+                    fig_frontier.update_layout(title='Efficient Frontier (10,000 Simulations)', xaxis_title='Risk (Std Dev)', yaxis_title='Expected Return')
+                    st.plotly_chart(fig_frontier, use_container_width=True)
+                    
+                    # Save to session state
+                    st.session_state.portfolio = opt_df
+     
+    elif len(selected_symbols) == 1:
+        st.warning("Please select at least 2 stocks for portfolio optimisation")
+        
+        if st.button("Add Single Stock to Portfolio"):
+            st.session_state.portfolio = pd.DataFrame({
+                'Stock': selected_symbols,
+                'Optimal Weight %': 100
             })
-            total_value += current_value
-            daily_change_total += (current_value * daily_change / 100)
-        
-        # Show warnings for failed fetches
-        if failed_symbols:
-            st.warning(f"Could not fetch current prices for: {', '.join(failed_symbols)}. They are excluded from calculations.")
-        
-        # If no valid holdings after filtering, show empty state
-        if not portfolio_data:
-            st.error("No valid stock data available. Please check your holdings or try again later.")
-        else:
-            df_portfolio = pd.DataFrame(portfolio_data)
-            
-            # Metrics row
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Total Portfolio Value", f"${total_value:,.2f}")
-            with col2:
-                total_gain_loss = df_portfolio['Gain/Loss ($)'].sum()
-                total_cost = (df_portfolio['Shares'] * df_portfolio['Purchase Price']).sum()
-                total_gain_loss_pct = (total_gain_loss / total_cost) * 100 if total_cost > 0 else 0
-                st.metric("Total Gain/Loss", f"${total_gain_loss:,.2f}", delta=f"{total_gain_loss_pct:.2f}%")
-            with col3:
-                st.metric("Today's Change", f"${daily_change_total:,.2f}", 
-                          delta=f"{(daily_change_total/total_value)*100:.2f}%" if total_value > 0 else "0%")
-            with col4:
-                best_holding = df_portfolio.loc[df_portfolio['Gain/Loss (%)'].idxmax()] if not df_portfolio.empty else None
-                worst_holding = df_portfolio.loc[df_portfolio['Gain/Loss (%)'].idxmin()] if not df_portfolio.empty else None
-                st.metric("🏆 Best Performer", best_holding['Symbol'] if best_holding is not None else "N/A", 
-                          delta=f"{best_holding['Gain/Loss (%)']:.2f}%" if best_holding is not None else None)
-            
-            # Portfolio holdings table
-            st.subheader("📋 Current Holdings")
-            st.dataframe(df_portfolio.style.format({
-                'Current Value': '${:,.2f}',
-                'Gain/Loss ($)': '${:,.2f}',
-                'Gain/Loss (%)': '{:.2f}%',
-                'Daily Change (%)': '{:.2f}%'
-            }), use_container_width=True)
-            
-            # Allocation pie chart
-            if len(df_portfolio) > 0:
-                st.subheader("🥧 Portfolio Allocation by Value")
-                fig_pie = px.pie(df_portfolio, values='Current Value', names='Symbol', title="")
-                st.plotly_chart(fig_pie, use_container_width=True)
-            
-            # Performance over last 30 days
-            st.subheader("📈 Performance Over Last 30 Days")
-            end = datetime.now()
-            start = end - timedelta(days=30)
-            combined = pd.DataFrame()
-            for symbol in df_portfolio['Symbol'].unique():
-                hist = yf.Ticker(symbol).history(start=start, end=end)
-                if not hist.empty and len(hist) > 0:
-                    norm = hist['Close'] / hist['Close'].iloc[0] * 100
-                    combined[symbol] = norm
-            if not combined.empty:
-                st.line_chart(combined)
-            else:
-                st.info("Insufficient historical data to display performance chart.")
-            
-# ---------------------------
-# Page: Portfolio Management
-# ---------------------------
-elif page == "📈 Portfolio":
-    st.title("📈 Manage Your Portfolio")
-    
-    # Add new stock form
-    with st.expander("➕ Add New Holding", expanded=True):
-        with st.form("add_holding_form"):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                symbol = st.text_input("Stock Symbol", "AAPL").upper()
-            with col2:
-                shares = st.number_input("Number of Shares", min_value=0.01, step=1.0, value=10.0)
-            with col3:
-                purchase_price = st.number_input("Purchase Price per Share ($)", min_value=0.01, step=1.0, value=150.0)
-            submitted = st.form_submit_button("Add to Portfolio")
-            if submitted:
-                if symbol and shares > 0 and purchase_price > 0:
-                    # Check if symbol already exists
-                    existing = st.session_state.portfolio[st.session_state.portfolio['Symbol'] == symbol]
-                    if not existing.empty:
-                        st.warning(f"{symbol} already in portfolio. Please remove first or edit manually.")
-                    else:
-                        new_row = pd.DataFrame([[symbol, shares, purchase_price]], 
-                                               columns=['Symbol', 'Shares', 'Purchase Price'])
-                        st.session_state.portfolio = pd.concat([st.session_state.portfolio, new_row], ignore_index=True)
-                        st.success(f"Added {shares} shares of {symbol} at ${purchase_price:.2f}")
-                        st.rerun()
-                else:
-                    st.error("Please fill all fields correctly.")
-    
-    # Display and edit current holdings
-    st.subheader("✏️ Current Holdings (Editable Table)")
-    if not st.session_state.portfolio.empty:
-        edited_df = st.data_editor(st.session_state.portfolio, num_rows="dynamic", use_container_width=True)
-        if st.button("💾 Save Changes"):
-            st.session_state.portfolio = edited_df
-            st.success("Portfolio updated!")
+            st.success(f"Added {selected_symbols[0]} to portfolio")
     else:
-        st.info("Your portfolio is empty. Use the form above to add stocks.")
-    
-    # Remove stock by symbol
-    st.subheader("🗑️ Remove Holding")
-    if not st.session_state.portfolio.empty:
-        symbol_to_remove = st.selectbox("Select Symbol to Remove", st.session_state.portfolio['Symbol'].unique())
-        if st.button("Remove Selected"):
-            st.session_state.portfolio = st.session_state.portfolio[st.session_state.portfolio['Symbol'] != symbol_to_remove]
-            st.success(f"Removed {symbol_to_remove}")
-            st.rerun()
-    else:
-        st.write("No holdings to remove.")
+        st.info("Please select stocks from the NIFTY 50 universe")
 
 # ---------------------------
-# Page: Watchlist
+# Page 3: Stock Analysis
 # ---------------------------
-elif page == "👀 Watchlist":
-    st.title("👀 Stock Watchlist")
-    
-    # Add to watchlist
-    with st.form("add_watchlist_form"):
-        watch_symbol = st.text_input("Add Symbol to Watchlist", "MSFT").upper()
-        submitted = st.form_submit_button("➕ Add")
-        if submitted:
-            if watch_symbol:
-                if watch_symbol not in st.session_state.watchlist:
-                    # Validate symbol
-                    data = get_stock_data(watch_symbol, period='1d')
-                    if data is not None and not data.empty:
-                        st.session_state.watchlist.append(watch_symbol)
-                        st.success(f"Added {watch_symbol} to watchlist.")
-                    else:
-                        st.error(f"Invalid symbol: {watch_symbol}")
-                else:
-                    st.warning(f"{watch_symbol} already in watchlist.")
-            else:
-                st.error("Please enter a symbol.")
-    
-    # Display watchlist with current prices
-    if st.session_state.watchlist:
-        st.subheader("📋 Watchlist Items")
-        watch_data = []
-        for symbol in st.session_state.watchlist:
-            price = get_current_price(symbol)
-            # Get daily change
-            hist = yf.Ticker(symbol).history(period='2d')
-            if len(hist) >= 2:
-                change_pct = (hist['Close'].iloc[-1] - hist['Close'].iloc[-2]) / hist['Close'].iloc[-2] * 100
-            else:
-                change_pct = None
-            watch_data.append({
-                'Symbol': symbol,
-                'Current Price': f"${price:.2f}" if price is not None else "N/A",
-                'Daily Change (%)': f"{change_pct:.2f}%" if change_pct is not None else "N/A"
-            })
-        watch_df = pd.DataFrame(watch_data)
-        st.dataframe(watch_df, use_container_width=True)
-        
-        # Remove from watchlist
-        st.subheader("❌ Remove from Watchlist")
-        remove_symbol = st.selectbox("Select Symbol to Remove", st.session_state.watchlist)
-        if st.button("Remove"):
-            st.session_state.watchlist.remove(remove_symbol)
-            st.rerun()
-    else:
-        st.info("Your watchlist is empty. Add some symbols above.")
-
-# ---------------------------
-# Page: Analysis (with all indicators)
-# ---------------------------
-elif page == "🔬 Analysis":
+elif page == "🔬 Stock Analysis":
     st.title("🔬 Advanced Stock Analysis")
-    st.markdown("Get detailed technical indicators: RSI, MACD, Bollinger Bands, Moving Averages.")
+    st.markdown("Comprehensive technical analysis for any NIFTY stock")
     
-    symbol_analysis = st.text_input("Enter Stock Symbol", "AAPL").upper()
-    period = st.selectbox("Select Data Period", ["1mo", "3mo", "6mo", "1y", "2y"], index=3)
+    selected_stock = st.selectbox("Select Stock for Analysis", NIFTY_50_SYMBOLS, index=1)
+    period = st.selectbox("Analysis Period", ["3mo", "6mo", "1y", "2y"], index=2)
     
-    if symbol_analysis:
-        df = get_stock_data(symbol_analysis, period=period)
-        if df is None or df.empty:
-            st.error(f"No data found for {symbol_analysis}. Please check the symbol.")
-        else:
-            st.success(f"Showing analysis for {symbol_analysis}")
+    if selected_stock:
+        data = fetch_stock_data([selected_stock], period=period)
+        
+        if data is not None and not data.empty:
+            # Calculate Indicators
+            data['SMA20'] = compute_sma(data['Close'], 20)
+            data['SMA50'] = compute_sma(data['Close'], 50)
+            data['SMA200'] = compute_sma(data['Close'], 200)
+            data['RSI'] = compute_rsi(data['Close'])
+            macd_line, signal_line, macd_hist = compute_macd(data['Close'])
+            data['MACD'] = macd_line
+            data['MACD_Signal'] = signal_line
+            data['MACD_Hist'] = macd_hist
+            bb_middle, bb_upper, bb_lower = compute_bollinger_bands(data['Close'])
+            data['BB_Upper'] = bb_upper
+            data['BB_Lower'] = bb_lower
+            data['ATR'] = compute_atr(data['High'], data['Low'], data['Close'])
+            data['OBV'] = compute_obv(data['Close'], data['Volume'])
+            stoch_k, stoch_d = compute_stochastic(data['High'], data['Low'], data['Close'])
+            data['Stoch_K'] = stoch_k
+            data['Stoch_D'] = stoch_d
             
-            # Key metrics row
-            info = yf.Ticker(symbol_analysis).info
+            # Header Metrics
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Current Price", f"${df['Close'].iloc[-1]:.2f}")
+                st.metric("Current Price", f"₹{data['Close'].iloc[-1]:.2f}")
             with col2:
-                pe = info.get('trailingPE', 'N/A')
-                st.metric("P/E Ratio", pe if pe == 'N/A' else f"{pe:.2f}")
+                change = ((data['Close'].iloc[-1] - data['Close'].iloc[-2]) / data['Close'].iloc[-2]) * 100
+                st.metric("Daily Change", f"{change:.2f}%", delta=f"{change:.2f}%")
             with col3:
-                market_cap = info.get('marketCap', 'N/A')
-                if market_cap != 'N/A':
-                    st.metric("Market Cap", f"${market_cap/1e9:.2f}B")
-                else:
-                    st.metric("Market Cap", "N/A")
+                st.metric("RSI (14)", f"{data['RSI'].iloc[-1]:.1f}")
             with col4:
-                dividend_yield = info.get('dividendYield', 0)
-                if dividend_yield:
-                    st.metric("Dividend Yield", f"{dividend_yield*100:.2f}%")
-                else:
-                    st.metric("Dividend Yield", "N/A")
+                st.metric("Volume (Today)", f"{data['Volume'].iloc[-1]:,.0f}")
             
-            # Price chart with EMAs
-            st.subheader("📉 Price Chart with Exponential Moving Averages")
+            # Price Chart with BB and MAs
+            st.subheader("📉 Price Chart with Bollinger Bands & Moving Averages")
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=df.index, y=df['Close'], mode='lines', name='Close Price', line=dict(color='blue')))
-            # EMA 12 and 26 (common)
-            ema12 = df['Close'].ewm(span=12, adjust=False).mean()
-            ema26 = df['Close'].ewm(span=26, adjust=False).mean()
-            fig.add_trace(go.Scatter(x=df.index, y=ema12, mode='lines', name='EMA 12', line=dict(color='orange', dash='dash')))
-            fig.add_trace(go.Scatter(x=df.index, y=ema26, mode='lines', name='EMA 26', line=dict(color='red', dash='dash')))
-            fig.update_layout(title=f"{symbol_analysis} - Price & EMAs", xaxis_title="Date", yaxis_title="Price (USD)", hovermode='x unified')
+            fig.add_trace(go.Candlestick(x=data.index, open=data['Open'], high=data['High'], low=data['Low'], close=data['Close'], name='Price'))
+            fig.add_trace(go.Scatter(x=data.index, y=data['BB_Upper'], mode='lines', name='BB Upper', line=dict(color='gray', dash='dash')))
+            fig.add_trace(go.Scatter(x=data.index, y=data['BB_Lower'], mode='lines', name='BB Lower', line=dict(color='gray', dash='dash')))
+            fig.add_trace(go.Scatter(x=data.index, y=data['SMA20'], mode='lines', name='SMA20', line=dict(color='blue')))
+            fig.add_trace(go.Scatter(x=data.index, y=data['SMA50'], mode='lines', name='SMA50', line=dict(color='orange')))
+            fig.update_layout(title=f'{selected_stock} - Price Analysis', xaxis_title='Date', yaxis_title='Price (₹)', hovermode='x unified')
             st.plotly_chart(fig, use_container_width=True)
             
-            # RSI
+            # RSI Chart
             st.subheader("📊 Relative Strength Index (RSI)")
-            rsi = compute_RSI(df['Close'])
             fig_rsi = go.Figure()
-            fig_rsi.add_trace(go.Scatter(x=df.index, y=rsi, mode='lines', name='RSI', line=dict(color='purple')))
-            fig_rsi.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Overbought (70)")
-            fig_rsi.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Oversold (30)")
-            fig_rsi.update_layout(title=f"RSI (14-day)", xaxis_title="Date", yaxis_title="RSI")
+            fig_rsi.add_trace(go.Scatter(x=data.index, y=data['RSI'], mode='lines', name='RSI', line=dict(color='purple')))
+            fig_rsi.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Overbought")
+            fig_rsi.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Oversold")
+            fig_rsi.update_layout(title='RSI (14-Day)', xaxis_title='Date', yaxis_title='RSI')
             st.plotly_chart(fig_rsi, use_container_width=True)
-            current_rsi = rsi.iloc[-1]
-            st.metric("Current RSI", f"{current_rsi:.2f}", 
-                      delta="Overbought" if current_rsi > 70 else ("Oversold" if current_rsi < 30 else "Neutral"))
             
-            # MACD
+            # MACD Chart
             st.subheader("📈 MACD (Moving Average Convergence Divergence)")
-            macd_line, signal_line, histogram = compute_MACD(df['Close'])
-            fig_macd = go.Figure()
-            fig_macd.add_trace(go.Scatter(x=df.index, y=macd_line, mode='lines', name='MACD Line', line=dict(color='blue')))
-            fig_macd.add_trace(go.Scatter(x=df.index, y=signal_line, mode='lines', name='Signal Line', line=dict(color='red')))
-            fig_macd.add_bar(x=df.index, y=histogram, name='Histogram', marker_color='grey')
-            fig_macd.update_layout(title=f"MACD (12,26,9)", xaxis_title="Date", yaxis_title="Value")
+            fig_macd = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
+            fig_macd.add_trace(go.Scatter(x=data.index, y=data['Close'], mode='lines', name='Close Price'), row=1, col=1)
+            fig_macd.add_trace(go.Scatter(x=data.index, y=data['MACD'], mode='lines', name='MACD', line=dict(color='blue')), row=2, col=1)
+            fig_macd.add_trace(go.Scatter(x=data.index, y=data['MACD_Signal'], mode='lines', name='Signal', line=dict(color='red')), row=2, col=1)
+            fig_macd.add_bar(x=data.index, y=data['MACD_Hist'], name='Histogram', row=2, col=1)
+            fig_macd.update_layout(title=f'{selected_stock} - MACD Analysis', height=600)
             st.plotly_chart(fig_macd, use_container_width=True)
             
-            # Bollinger Bands
-            st.subheader("📉 Bollinger Bands (20-day, 2 std dev)")
-            middle_band, upper_band, lower_band = compute_Bollinger_Bands(df['Close'])
-            fig_bb = go.Figure()
-            fig_bb.add_trace(go.Scatter(x=df.index, y=df['Close'], mode='lines', name='Close Price', line=dict(color='black')))
-            fig_bb.add_trace(go.Scatter(x=df.index, y=upper_band, mode='lines', name='Upper Band', line=dict(color='red', dash='dash')))
-            fig_bb.add_trace(go.Scatter(x=df.index, y=middle_band, mode='lines', name='Middle Band (SMA20)', line=dict(color='blue')))
-            fig_bb.add_trace(go.Scatter(x=df.index, y=lower_band, mode='lines', name='Lower Band', line=dict(color='green', dash='dash')))
-            fig_bb.update_layout(title=f"Bollinger Bands", xaxis_title="Date", yaxis_title="Price (USD)")
-            st.plotly_chart(fig_bb, use_container_width=True)
+            # Volatility (ATR) Chart
+            st.subheader("📉 Average True Range (ATR) - Market Volatility")
+            fig_atr = go.Figure()
+            fig_atr.add_trace(go.Scatter(x=data.index, y=data['ATR'], mode='lines', name='ATR', fill='tozeroy', line=dict(color='orange')))
+            fig_atr.update_layout(title='ATR (14-Day) - Higher ATR indicates higher volatility', xaxis_title='Date', yaxis_title='ATR')
+            st.plotly_chart(fig_atr, use_container_width=True)
             
-            # Volume
-            st.subheader("📊 Trading Volume")
-            fig_vol = go.Figure()
-            fig_vol.add_trace(go.Bar(x=df.index, y=df['Volume'], name='Volume', marker_color='lightblue'))
-            fig_vol.update_layout(title="Volume over time", xaxis_title="Date", yaxis_title="Volume")
-            st.plotly_chart(fig_vol, use_container_width=True)
+            # On-Balance Volume Chart
+            st.subheader("📊 On-Balance Volume (OBV)")
+            fig_obv = go.Figure()
+            fig_obv.add_trace(go.Scatter(x=data.index, y=data['OBV'], mode='lines', name='OBV', line=dict(color='green')))
+            fig_obv.update_layout(title='OBV - Volume-based momentum indicator', xaxis_title='Date', yaxis_title='OBV')
+            st.plotly_chart(fig_obv, use_container_width=True)
             
-            # Additional info: 52-week range, beta, etc.
-            st.subheader("ℹ️ Additional Fundamentals")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                week52low = info.get('fiftyTwoWeekLow', 'N/A')
-                week52high = info.get('fiftyTwoWeekHigh', 'N/A')
-                st.metric("52-Week Range", f"{week52low} - {week52high}")
-            with col2:
-                beta = info.get('beta', 'N/A')
-                st.metric("Beta", beta if beta == 'N/A' else f"{beta:.2f}")
-            with col3:
-                avg_volume = info.get('averageVolume', 'N/A')
-                st.metric("Avg Volume (3M)", avg_volume if avg_volume == 'N/A' else f"{avg_volume:,}")
+            # Stochastic Oscillator Chart
+            st.subheader("🎲 Stochastic Oscillator")
+            fig_stoch = go.Figure()
+            fig_stoch.add_trace(go.Scatter(x=data.index, y=data['Stoch_K'], mode='lines', name='%K', line=dict(color='blue')))
+            fig_stoch.add_trace(go.Scatter(x=data.index, y=data['Stoch_D'], mode='lines', name='%D', line=dict(color='red')))
+            fig_stoch.add_hline(y=80, line_dash="dash", line_color="red", annotation_text="Overbought")
+            fig_stoch.add_hline(y=20, line_dash="dash", line_color="green", annotation_text="Oversold")
+            fig_stoch.update_layout(title='Stochastic Oscillator (14,3)', xaxis_title='Date', yaxis_title='Value')
+            st.plotly_chart(fig_stoch, use_container_width=True)
+            
+            # Fibonacci Levels
+            st.subheader("🔢 Fibonacci Retracement Levels (52-Week Range)")
+            year_high = data['High'].max()
+            year_low = data['Low'].min()
+            fib_levels = compute_fibonacci_levels(year_high, year_low)
+            fib_df = pd.DataFrame(list(fib_levels.items()), columns=['Level', 'Price (₹)'])
+            st.dataframe(fib_df.style.format({'Price (₹)': '₹{:.2f}'}), use_container_width=True)
+            
+            # Store in session state for signal scanner
+            st.session_state.analysis_data[selected_stock] = {
+                'rsi': data['RSI'].iloc[-1],
+                'macd_hist': data['MACD_Hist'].iloc[-1],
+                'macd_hist_prev': data['MACD_Hist'].iloc[-2] if len(data) > 1 else 0,
+                'close': data['Close'].iloc[-1],
+                'bb_upper': data['BB_Upper'].iloc[-1],
+                'bb_lower': data['BB_Lower'].iloc[-1],
+                'sma50': data['SMA50'].iloc[-1],
+                'sma200': data['SMA200'].iloc[-1] if 'SMA200' in data.columns else data['SMA50'].iloc[-1],
+                'volume': data['Volume'].iloc[-1],
+                'avg_volume': data['Volume'].rolling(window=20).mean().iloc[-1],
+                'atr': data['ATR'].iloc[-1],
+                'avg_atr': data['ATR'].rolling(window=20).mean().iloc[-1]
+            }
+
+# ---------------------------
+# Page 4: Signal Scanner
+# ---------------------------
+elif page == "🎯 Signal Scanner":
+    st.title("🎯 12-Factor High-Conviction Signal Scanner")
+    st.markdown("Scores NIFTY 50 stocks based on 12 technical factors to identify top BUY/SELL opportunities")
+    
+    if st.button("🔄 Run Full Market Scan (50 Stocks)"):
+        with st.spinner("Scanning NIFTY 50 stocks (This may take a minute)..."):
+            all_scores = []
+            
+            for symbol in NIFTY_50_SYMBOLS:
+                try:
+                    # Fetch data for each symbol
+                    data = fetch_stock_data([symbol], period="3mo")
+                    if data is not None and not data.empty and len(data) > 50:
+                        # Calculate indicators
+                        rsi = compute_rsi(data['Close'])
+                        macd_line, signal_line, macd_hist = compute_macd(data['Close'])
+                        bb_middle, bb_upper, bb_lower = compute_bollinger_bands(data['Close'])
+                        sma50 = compute_sma(data['Close'], 50)
+                        sma200 = compute_sma(data['Close'], 200)
+                        atr = compute_atr(data['High'], data['Low'], data['Close'])
+                        
+                        # BB Position
+                        bb_position = (data['Close'].iloc[-1] - bb_lower.iloc[-1]) / (bb_upper.iloc[-1] - bb_lower.iloc[-1]) if (bb_upper.iloc[-1] - bb_lower.iloc[-1]) > 0 else 0.5
+                        
+                        # MA Crossover Signal
+                        if len(sma50) > 1 and len(sma200) > 1:
+                            if sma50.iloc[-1] > sma200.iloc[-1] and sma50.iloc[-2] <= sma200.iloc[-2]:
+                                ma_cross = 1  # Golden Cross
+                            elif sma50.iloc[-1] < sma200.iloc[-1] and sma50.iloc[-2] >= sma200.iloc[-2]:
+                                ma_cross = -1  # Death Cross
+                            else:
+                                ma_cross = 0
+                        else:
+                            ma_cross = 0
+                        
+                        # Volume Ratio
+                        avg_volume = data['Volume'].rolling(window=20).mean().iloc[-1] if len(data) > 20 else data['Volume'].mean()
+                        volume_ratio = data['Volume'].iloc[-1] / avg_volume if avg_volume > 0 else 1
+                        
+                        # Prepare data dictionary
+                        data_dict = {
+                            'rsi': rsi.iloc[-1],
+                            'macd_hist': macd_hist.iloc[-1] if not macd_hist.empty else 0,
+                            'macd_hist_prev': macd_hist.iloc[-2] if len(macd_hist) > 1 else 0,
+                            'bb_position': bb_position - 1,  # Negative = below lower band, Positive = above upper band
+                            'ma_cross': ma_cross,
+                            'volume_ratio': volume_ratio,
+                            'atr': atr.iloc[-1] if not atr.empty else 0,
+                            'avg_atr': atr.rolling(window=20).mean().iloc[-1] if len(atr) > 20 else atr.mean()
+                        }
+                        
+                        score, reasons = compute_signal_score(data_dict)
+                        
+                        all_scores.append({
+                            'Symbol': symbol,
+                            'Score': score,
+                            'Signal': 'STRONG BUY' if score > 30 else ('BUY' if score > 15 else ('NEUTRAL' if -15 <= score <= 15 else ('SELL' if score < -15 else 'STRONG SELL'))),
+                            'RSI': f"{rsi.iloc[-1]:.1f}",
+                            'Volume Ratio': f"{volume_ratio:.2f}x"
+                        })
+                except Exception as e:
+                    continue
+            
+            # Sort by score
+            if all_scores:
+                results_df = pd.DataFrame(all_scores)
+                results_df = results_df.sort_values('Score', ascending=False)
+                
+                # Display Top 5 BUY and Top 5 SELL
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.subheader("🟢 Top 5 BUY Signals")
+                    top_buy = results_df[results_df['Score'] > 15].head(5)
+                    if not top_buy.empty:
+                        st.dataframe(top_buy.style.apply(lambda x: ['background: #1a3b32' if i < len(top_buy) else '' for i in range(len(x))], axis=0), use_container_width=True)
+                    else:
+                        st.info("No strong buy signals found")
+                
+                with col2:
+                    st.subheader("🔴 Top 5 SELL Signals")
+                    top_sell = results_df[results_df['Score'] < -15].tail(5).sort_values('Score', ascending=True)
+                    if not top_sell.empty:
+                        st.dataframe(top_sell.style.apply(lambda x: ['background: #3b1a1a' if i < len(top_sell) else '' for i in range(len(x))], axis=0), use_container_width=True)
+                    else:
+                        st.info("No strong sell signals found")
+                
+                # Full table
+                st.subheader("📋 Complete Signal Scanner Results")
+                st.dataframe(results_df, use_container_width=True)
+                
+                # Market Breadth Gauge
+                st.subheader("📊 Market Breadth")
+                bullish_count = len(results_df[results_df['Score'] > 15])
+                bearish_count = len(results_df[results_df['Score'] < -15])
+                neutral_count = len(results_df) - bullish_count - bearish_count
+                
+                breadth_data = pd.DataFrame({
+                    'Sentiment': ['Bullish', 'Bearish', 'Neutral'],
+                    'Count': [bullish_count, bearish_count, neutral_count]
+                })
+                fig_breadth = px.pie(breadth_data, values='Count', names='Sentiment', title='Market Sentiment Distribution', color='Sentiment', color_discrete_map={'Bullish': 'green', 'Bearish': 'red', 'Neutral': 'gray'})
+                st.plotly_chart(fig_breadth, use_container_width=True)
+                
+                st.success(f"Scan complete! Analysed {len(all_scores)} stocks")
+            else:
+                st.error("Failed to scan stocks. Please check your internet connection.")
+
+# ---------------------------
+# Page 5: Risk Analytics
+# ---------------------------
+elif page == "📊 Risk Analytics":
+    st.title("📊 Advanced Portfolio Risk Analytics")
+    st.markdown("Comprehensive risk assessment and portfolio optimisation metrics")
+    
+    if not st.session_state.portfolio.empty:
+        portfolio_stocks = st.session_state.portfolio['Stock'].tolist()
+        weights = st.session_state.portfolio['Optimal Weight %'].values / 100
+        
+        period = st.selectbox("Risk Analysis Period", ["1y", "2y", "3y"], index=0)
+        
+        if st.button("Calculate Risk Metrics"):
+            with st.spinner("Fetching data and calculating risk metrics..."):
+                # Fetch historical data
+                returns_data = fetch_stock_data(portfolio_stocks, period=period)
+                
+                if returns_data is not None and not returns_data.empty:
+                    # Calculate returns
+                    returns = returns_data.pct_change().dropna()
+                    
+                    # Portfolio returns
+                    if len(portfolio_stocks) > 1:
+                        port_returns = returns.dot(weights)
+                    else:
+                        port_returns = returns
+                    
+                    # Calculate comprehensive risk metrics
+                    metrics = compute_risk_metrics(port_returns)
+                    
+                    # Display metrics in columns
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Sharpe Ratio", f"{metrics['Sharpe Ratio']:.2f}", help="Risk-adjusted return (>1 good, >2 excellent)")
+                        st.metric("Sortino Ratio", f"{metrics['Sortino Ratio']:.2f}", help="Downside risk-adjusted return")
+                        st.metric("Max Drawdown", f"{metrics['Max Drawdown']:.2%}", help="Worst peak-to-trough decline")
+                    
+                    with col2:
+                        st.metric("Annualized Return", f"{metrics['Annualized Return']:.2%}", help="Average yearly return")
+                        st.metric("Annualized Volatility", f"{metrics['Annualized Volatility']:.2%}", help="Standard deviation of returns")
+                        st.metric("VaR (95%)", f"{metrics['VaR (95%)']:.2%}", help="Maximum expected loss at 95% confidence")
+                    
+                    with col3:
+                        st.metric("CVaR (95%)", f"{metrics['CVaR (95%)']:.2%}", help="Expected loss in worst 5% of cases")
+                        
+                        # Risk Rating
+                        if metrics['Sharpe Ratio'] > 1:
+                            risk_rating = "Excellent"
+                            rating_color = "🟢"
+                        elif metrics['Sharpe Ratio'] > 0.5:
+                            risk_rating = "Good"
+                            rating_color = "🟡"
+                        else:
+                            risk_rating = "Poor"
+                            rating_color = "🔴"
+                        st.metric("Risk Rating", f"{rating_color} {risk_rating}")
+                    
+                    # Drawdown chart
+                    st.subheader("📉 Portfolio Drawdown Analysis")
+                    cumulative = (1 + port_returns).cumprod()
+                    running_max = cumulative.expanding().max()
+                    drawdown = (cumulative - running_max) / running_max
+                    
+                    fig_dd = go.Figure()
+                    fig_dd.add_trace(go.Scatter(x=drawdown.index, y=drawdown, mode='lines', name='Drawdown', fill='tozeroy', line=dict(color='red')))
+                    fig_dd.update_layout(title='Portfolio Drawdown Over Time', xaxis_title='Date', yaxis_title='Drawdown (%)')
+                    st.plotly_chart(fig_dd, use_container_width=True)
+                    
+                    # Rolling Sharpe Ratio
+                    st.subheader("📈 Rolling Sharpe Ratio (60-Day Window)")
+                    rolling_sharpe = port_returns.rolling(window=60).apply(lambda x: np.sqrt(252) * x.mean() / x.std() if x.std() > 0 else 0)
+                    fig_rs = go.Figure()
+                    fig_rs.add_trace(go.Scatter(x=rolling_sharpe.index, y=rolling_sharpe, mode='lines', name='Rolling Sharpe', line=dict(color='green')))
+                    fig_rs.add_hline(y=1, line_dash="dash", line_color="gray", annotation_text="Good Threshold")
+                    fig_rs.update_layout(title='Rolling Sharpe Ratio (60 Days)', xaxis_title='Date', yaxis_title='Sharpe Ratio')
+                    st.plotly_chart(fig_rs, use_container_width=True)
+                    
+                    # Correlation Matrix Heatmap
+                    if len(portfolio_stocks) > 1:
+                        st.subheader("📊 Correlation Heatmap")
+                        corr_matrix = returns.corr()
+                        fig_corr = px.imshow(corr_matrix, text_auto=True, aspect="auto", color_continuous_scale='RdBu', title='Portfolio Correlation Matrix')
+                        st.plotly_chart(fig_corr, use_container_width=True)
+                    
+                    # Risk Contribution
+                    st.subheader("🎯 Risk Contribution by Asset")
+                    if len(portfolio_stocks) > 1:
+                        # Calculate Marginal Risk Contribution
+                        covariance = returns.cov() * 252
+                        port_variance = np.dot(weights.T, np.dot(covariance, weights))
+                        marginal_contrib = np.dot(covariance, weights) / port_variance
+                        risk_contrib = marginal_contrib * weights
+                        
+                        risk_df = pd.DataFrame({
+                            'Stock': portfolio_stocks,
+                            'Risk Contribution %': risk_contrib * 100,
+                            'Weight %': weights * 100
+                        }).sort_values('Risk Contribution %', ascending=False)
+                        
+                        fig_rc = go.Figure()
+                        fig_rc.add_trace(go.Bar(x=risk_df['Stock'], y=risk_df['Risk Contribution %'], name='Risk Contribution', marker_color='coral'))
+                        fig_rc.add_trace(go.Bar(x=risk_df['Stock'], y=risk_df['Weight %'], name='Weight', marker_color='lightblue'))
+                        fig_rc.update_layout(title='Risk Contribution vs Portfolio Weight', xaxis_title='Stock', yaxis_title='Percentage (%)', barmode='group')
+                        st.plotly_chart(fig_rc, use_container_width=True)
+                    
+                    st.success("Risk analysis complete!")
+    else:
+        st.warning("Please build a portfolio first using the Portfolio Builder page.")
+        st.info("Go to **Portfolio Builder** → Select stocks → Click **Optimise Portfolio** to create a portfolio")
